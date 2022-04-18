@@ -27,7 +27,7 @@ public final class DAOFactory {
             throw new IllegalArgumentException("path is not a directory: " + data);
         }
 
-        return
+        return new LsmDAOImpl(data, (int) MAX_HEAP / 32, 4);
     }
 
 }

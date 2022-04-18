@@ -79,7 +79,7 @@ public class LsmDAOImpl implements DAO {
 
     @NotNull
     @Override
-    public Iterator<Record> iterator(@NotNull ByteBuffer from) {]
+    public Iterator<Record> iterator(@NotNull ByteBuffer from) {
         final Iterator<Cell> freshElements = cellIterator(from);
         final Iterator<Cell> aliveElements = Iterators.filter(freshElements, el -> !el.getValue().isTombstone());
         return Iterators.transform(aliveElements, el -> Record.of(el.getKey(), el.getValue().getData()));
@@ -96,18 +96,93 @@ public class LsmDAOImpl implements DAO {
     }
 
     @Override
-    public void upsert(@NotNull ByteBuffer key, @NotNull ByteBuffer value) throws IOException {
-
+    public void upsert(@NotNull final ByteBuffer key, @NotNull final ByteBuffer value) {
+        execute(() -> tableSet.memTable.upsert(key, value));
     }
 
     @Override
-    public void remove(@NotNull ByteBuffer key) throws IOException {
+    public void remove(@NotNull final ByteBuffer key) {
+        execute(() -> tableSet.memTable.remove(key));
+    }
 
+    @Override
+    public synchronized void compact() throws IOException {
+        final boolean isEmptyListOfFiles;
+        readLock.lock();
+        try {
+            isEmptyListOfFiles = tableSet.ssTables.isEmpty();
+        } finally {
+            readLock.unlock();
+        }
+        if (isEmptyListOfFiles) {
+            return;
+        }
+        final TableSet snapshot;
+        writeLock.lock();
+        try {
+            snapshot = tableSet;
+            tableSet = tableSet.startCompact();
+        } finally {
+            writeLock.unlock();
+        }
+
+        logger.debug("Compacting byte(s) to to {}", snapshot.generation);
+
+        final List<Iterator<Cell>> iters = new ArrayList<>(snapshot.ssTables.size());
+        final Iterator<Cell> freshElements = freshCellIterator(EMPTY_BUFFER, iters, snapshot);
+        final File dst = serialize(snapshot.generation, freshElements);
+
+        try (Stream<Path> files = Files.list(storage.toPath())) {
+            files.filter(f -> {
+                final String name = f.getFileName().toFile().toString();
+                final int gen = Integer.parseInt(name.substring(0, name.indexOf('.')));
+                final boolean correctPostfix = name.endsWith(SSTable_FILE_POSTFIX);
+                final boolean isNotFlushing = snapshot.ssTables.containsKey(gen);
+                return gen < snapshot.generation && correctPostfix && isNotFlushing;
+            }).forEach(f -> {
+                try {
+                    Files.delete(f);
+                } catch (IOException e) {
+                    logger.warn("Unable to delete file: " + f.getFileName().toFile().toString(), e);
+                }
+            });
+        }
+
+        logger.debug("Compacted byte(s) to {}", snapshot.generation);
+
+        writeLock.lock();
+        try {
+            tableSet = tableSet.finishCompact(snapshot.ssTables, dst, snapshot.generation);
+        } finally {
+            writeLock.unlock();
+        }
     }
 
     @Override
     public void close() throws IOException {
+        final boolean isReadyToFlush;
+        readLock.lock();
+        try {
+            isReadyToFlush = tableSet.memTable.size() > 0;
+        } finally {
+            readLock.unlock();
+        }
 
+        if (isReadyToFlush) {
+            flush();
+        }
+        service.shutdown();
+        while (true) {
+            if (service.isTerminated()) {
+                break;
+            }
+        }
+        readLock.lock();
+        try {
+            tableSet.ssTables.values().forEach(Table::close);
+        } finally {
+            readLock.unlock();
+        }
     }
 
     private TableSet getSnapshot() {

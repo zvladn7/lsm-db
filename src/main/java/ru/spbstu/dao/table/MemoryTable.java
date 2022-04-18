@@ -38,7 +38,7 @@ public class MemoryTable implements Table {
     }
 
     @Override
-    public void upsert(@NotNull ByteBuffer key, @NotNull ByteBuffer value) throws IOException {
+    public void upsert(@NotNull ByteBuffer key, @NotNull ByteBuffer value) {
         final Value val = map.put(key.duplicate(), new Value(System.currentTimeMillis(), value.duplicate()));
         if (val == null) {
             bytes.addAndGet(key.remaining() + value.remaining() + Long.BYTES);
